@@ -10,11 +10,12 @@ import (
 
 // Pool 处理池
 type Pool struct {
-	handler  nsq.Handler
-	msgChan  chan *nsq.Message
-	items    []*poolItem
-	size     uint64
-	msgCount uint64
+	handler   nsq.Handler
+	msgChan   chan *nsq.Message
+	items     []*poolItem
+	size      uint64
+	msgCount  uint64
+	lastCount uint64
 	sync.Mutex
 
 	adjustDuration time.Duration
@@ -31,7 +32,7 @@ func New(handler nsq.Handler, size uint64) *Pool {
 		msgChan:        make(chan *nsq.Message),
 		size:           size,
 		exitChan:       make(chan int),
-		adjustDuration: time.Second * 5,
+		adjustDuration: time.Second * 5, // TODO: 调参
 	}
 	p.increase(1)
 	p.adjustTicker = time.NewTicker(p.adjustDuration)
@@ -66,6 +67,9 @@ func (p *Pool) decrease(delta uint64) {
 	if uint64(len(p.items)) < delta {
 		return
 	}
+	if n == 1 {
+		return
+	}
 	items := p.items[n-int(delta) : n-1]
 	for _, i := range items {
 		go i.destroy()
@@ -77,8 +81,27 @@ func (p *Pool) decrease(delta uint64) {
 
 func (p *Pool) adjust() {
 	count := p.msgCount
+	lastCount := p.lastCount
 	atomic.AddUint64(&p.msgCount, ^uint64(count-1))
-	// TODO: adjust items count
+	p.lastCount = count
+	delta := int(count) - int(lastCount)
+	if delta == 0 {
+		return
+	}
+	// more messages in this cycle
+	if delta > 0 {
+		increaseDelta := delta * 1 // TODO: 调参
+		if uint64(increaseDelta+len(p.items)) > p.size {
+			increaseDelta = int(p.size) - len(p.items)
+		}
+		p.increase(uint64(increaseDelta))
+		return
+	}
+	decreaseDelta := delta * -1
+	if len(p.items)-decreaseDelta <= 0 {
+		decreaseDelta = len(p.items) - 1
+	}
+	p.decrease(uint64(decreaseDelta))
 	return
 }
 
